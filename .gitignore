@@ -1,6 +1,8 @@
 # ==========================
 # Python
 # ==========================
+# Uploaded files
+backend/app/uploads/
 
 # Virtual environments
 venv/
