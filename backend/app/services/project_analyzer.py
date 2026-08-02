@@ -10,6 +10,7 @@ from app.services.important_files_detector import ImportantFilesDetector
 from app.services.entry_point_detector import EntryPointDetector
 from app.services.project_stats_detector import ProjectStatsDetector
 from app.scanners.scanner_manager import ScannerManager
+from app.intelligence.intelligence_engine import IntelligenceEngine
 from fastapi import HTTPException
 
 UPLOAD_FOLDER = "app/uploads"
@@ -116,6 +117,23 @@ class ProjectAnalyzer:
         )
 
         # ----------------------------------------------------------------
+        # Intelligence Layer — categorize, prioritize, score, insights
+        # ----------------------------------------------------------------
+        intelligence = IntelligenceEngine.analyze(
+            findings=scan_result["findings"],
+            metadata=metadata,
+        )
+
+        # Patch executive summary with scanner info (available here, not in engine)
+        intelligence["executive_summary"]["scanners_used"] = (
+            scan_result["summary"].get("scanners_run", [])
+        )
+
+        # Use enriched findings (with canonical category + priority) as the
+        # canonical findings list going forward
+        final_findings = intelligence.pop("enriched_findings")
+
+        # ----------------------------------------------------------------
         # Finalize timing
         # ----------------------------------------------------------------
         scan_finished = datetime.now()
@@ -131,5 +149,6 @@ class ProjectAnalyzer:
             "scan_duration_seconds": duration_seconds,
             "metadata":              metadata,
             "summary":               scan_result["summary"],
-            "findings":              scan_result["findings"],
+            "findings":              final_findings,
+            "intelligence":          intelligence,
         }
