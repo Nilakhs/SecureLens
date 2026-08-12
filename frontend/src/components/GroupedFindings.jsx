@@ -1,5 +1,6 @@
 import { useState } from "react";
 import AIExplanationPanel from "./AIExplanationPanel";
+import RemediationPanel from "./RemediationPanel";
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -44,9 +45,16 @@ function getErrorMessage(status) {
 
 function FindingMiniRow({ finding, projectPath }) {
   const [open, setOpen]               = useState(false);
+
+  // Explain state
   const [aiState, setAiState]         = useState("idle");   // idle | loading | success | error
   const [explanation, setExplanation] = useState(null);
   const [errorMsg, setErrorMsg]       = useState("");
+
+  // Fix state
+  const [fixState, setFixState]       = useState("idle");   // idle | loading | success | error
+  const [fix, setFix]                 = useState(null);
+  const [fixErrorMsg, setFixErrorMsg] = useState("");
 
   async function handleExplain(e) {
     // Don't toggle the row open/closed when the button is clicked
@@ -86,6 +94,39 @@ function FindingMiniRow({ finding, projectPath }) {
     } catch (err) {
       setErrorMsg("Network error: could not reach the backend. Make sure the backend server is running.");
       setAiState("error");
+    }
+  }
+
+  async function handleFix(e) {
+    e.stopPropagation();
+    if (fixState === "success") {
+      setFixState("idle");
+      setFix(null);
+      return;
+    }
+    setFixState("loading");
+    setFix(null);
+    setFixErrorMsg("");
+    try {
+      const res = await fetch(`${API_BASE}/findings/fix`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          finding:      finding,
+          project_path: projectPath ?? null,
+        }),
+      });
+      if (!res.ok) {
+        setFixErrorMsg(getErrorMessage(res.status));
+        setFixState("error");
+        return;
+      }
+      const data = await res.json();
+      setFix(data);
+      setFixState("success");
+    } catch (err) {
+      setFixErrorMsg("Network error: could not reach the backend.");
+      setFixState("error");
     }
   }
 
@@ -133,22 +174,35 @@ function FindingMiniRow({ finding, projectPath }) {
 
               {/* ── AI Explanation Section ── */}
               <div className="ai-explain-section">
-                <button
-                  className={`btn-explain-ai ${aiState === "success" ? "active" : ""}`}
-                  onClick={handleExplain}
-                  disabled={aiState === "loading"}
-                  aria-label="Explain this finding with AI"
-                >
-                  {aiState === "loading" && (
-                    <span className="btn-spinner" aria-hidden="true" />
-                  )}
-                  {aiState === "idle"    && "🤖 Explain with AI"}
-                  {aiState === "loading" && "Generating explanation…"}
-                  {aiState === "success" && "✕ Hide AI Explanation"}
-                  {aiState === "error"   && "🤖 Try Again"}
-                </button>
+                <div className="ai-action-buttons">
+                  <button
+                    className={`btn-explain-ai ${aiState === "success" ? "active" : ""}`}
+                    onClick={handleExplain}
+                    disabled={aiState === "loading"}
+                    aria-label="Explain this finding with AI"
+                  >
+                    {aiState === "loading" && <span className="btn-spinner" aria-hidden="true" />}
+                    {aiState === "idle"    && "🤖 Explain with AI"}
+                    {aiState === "loading" && "Generating explanation…"}
+                    {aiState === "success" && "✕ Hide Explanation"}
+                    {aiState === "error"   && "🤖 Try Again"}
+                  </button>
 
-                {/* Error message */}
+                  <button
+                    className={`btn-generate-fix ${fixState === "success" ? "active" : ""}`}
+                    onClick={handleFix}
+                    disabled={fixState === "loading"}
+                    aria-label="Generate a security fix with AI"
+                  >
+                    {fixState === "loading" && <span className="btn-spinner fix-spinner" aria-hidden="true" />}
+                    {fixState === "idle"    && "🛠️ Generate Fix"}
+                    {fixState === "loading" && "Generating fix…"}
+                    {fixState === "success" && "✕ Hide Fix"}
+                    {fixState === "error"   && "🛠️ Try Again"}
+                  </button>
+                </div>
+
+                {/* Explain error */}
                 {aiState === "error" && (
                   <div className="ai-error-box" role="alert">
                     <span className="ai-error-icon">⚠</span>
@@ -156,7 +210,7 @@ function FindingMiniRow({ finding, projectPath }) {
                   </div>
                 )}
 
-                {/* Loading state */}
+                {/* Explain loading */}
                 {aiState === "loading" && (
                   <div className="ai-loading-box" aria-live="polite">
                     <div className="ai-loading-pulse" />
@@ -164,9 +218,30 @@ function FindingMiniRow({ finding, projectPath }) {
                   </div>
                 )}
 
-                {/* Success — render explanation panel */}
+                {/* Explain success */}
                 {aiState === "success" && explanation && (
                   <AIExplanationPanel explanation={explanation} />
+                )}
+
+                {/* Fix error */}
+                {fixState === "error" && (
+                  <div className="ai-error-box" role="alert">
+                    <span className="ai-error-icon">⚠</span>
+                    <p>{fixErrorMsg}</p>
+                  </div>
+                )}
+
+                {/* Fix loading */}
+                {fixState === "loading" && (
+                  <div className="ai-loading-box" aria-live="polite">
+                    <div className="ai-loading-pulse fix-pulse" />
+                    <p>Generating secure fix with Gemini AI…</p>
+                  </div>
+                )}
+
+                {/* Fix success */}
+                {fixState === "success" && fix && (
+                  <RemediationPanel fix={fix} />
                 )}
               </div>
             </div>
