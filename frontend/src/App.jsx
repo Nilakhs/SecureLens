@@ -99,7 +99,10 @@ function App() {
             </div>
 
             {activeView === "grouped" ? (
-              <GroupedFindings intelligence={scanResult.intelligence} />
+              <GroupedFindings
+                intelligence={scanResult.intelligence}
+                projectPath={scanResult.project_path}
+              />
             ) : (
               <FindingsTable findings={scanResult.findings} />
             )}
