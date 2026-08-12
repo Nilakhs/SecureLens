@@ -151,4 +151,5 @@ class ProjectAnalyzer:
             "summary":               scan_result["summary"],
             "findings":              final_findings,
             "intelligence":          intelligence,
+            "project_path":          extract_path,
         }
