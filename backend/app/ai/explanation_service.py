@@ -8,6 +8,25 @@ from app.ai.cache import ExplanationCache
 logger = logging.getLogger(__name__)
 
 
+def _resolve_file_path(project_path: str | None, finding_file: str) -> str | None:
+    """
+    Safely resolve the on-disk path for a finding's source file.
+    Handles the case where finding_file already contains the full project_path
+    prefix (which would cause a doubled path if naively os.path.join'd).
+    """
+    if not project_path or not finding_file:
+        return None
+    proj = os.path.normpath(project_path)
+    ffile = os.path.normpath(finding_file)
+    if os.path.isabs(ffile):
+        return ffile
+    # If the normalized finding path already starts with the project path,
+    # use it directly (avoids: project_path/project_path/file.py)
+    if ffile.startswith(proj + os.sep) or ffile == proj:
+        return ffile
+    return os.path.join(proj, ffile)
+
+
 class ExplanationService:
     """
     Coordinates snippet extraction, prompt compiling, LLM calling, validating, and caching.
@@ -38,14 +57,7 @@ class ExplanationService:
             LLMError subclasses on failure.
         """
         # Resolve the actual file path on disk (if project_path is provided)
-        file_path = None
-        if project_path and finding.get("file"):
-            # Check if finding's file is absolute or relative
-            finding_file = finding["file"]
-            if os.path.isabs(finding_file):
-                file_path = finding_file
-            else:
-                file_path = os.path.join(project_path, finding_file)
+        file_path = _resolve_file_path(project_path, finding.get("file", ""))
 
         # 1. Best-effort extract code snippet
         line_number = finding.get("line", 0)
