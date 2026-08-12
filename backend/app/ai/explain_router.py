@@ -1,5 +1,7 @@
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy.orm import Session
+from app.database.connection import get_db
 from app.ai.schemas import ExplainRequest, AIExplanation
 from app.ai.explanation_service import ExplanationService
 from app.ai.llm_client import (
@@ -16,7 +18,7 @@ router = APIRouter(prefix="/findings", tags=["AI Explanation"])
 
 
 @router.post("/explain", response_model=AIExplanation)
-def explain_finding(payload: ExplainRequest):
+def explain_finding(payload: ExplainRequest, db: Session = Depends(get_db)):
     """
     On-demand AI security explanation endpoint.
     Receives a single finding details and optional project location to return
@@ -33,7 +35,7 @@ def explain_finding(payload: ExplainRequest):
         )
 
     try:
-        explanation = ExplanationService.explain(finding, project_path)
+        explanation = ExplanationService.explain(finding, project_path, db)
         return explanation
 
     except LLMUnavailableError as e:

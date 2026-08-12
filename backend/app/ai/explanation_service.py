@@ -1,9 +1,11 @@
 import os
 import logging
+from sqlalchemy.orm import Session
 from app.ai.snippet_extractor import SnippetExtractor
 from app.ai.prompt_builder import PromptBuilder
 from app.ai.llm_client import LLMClient, LLMInvalidResponseError
 from app.ai.cache import ExplanationCache
+from app.models.ai_explanation import AIExplanation
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +44,15 @@ class ExplanationService:
     }
 
     @classmethod
-    def explain(cls, finding: dict, project_path: str | None = None) -> dict:
+    def explain(cls, finding: dict, project_path: str | None = None, db: Session | None = None) -> dict:
         """
         Generates an AI explanation for a single vulnerability finding.
+        Utilizes both in-memory cache and PostgreSQL database persistence.
 
         Args:
             finding: The normalized finding dictionary.
             project_path: Optional path to the extracted project on disk.
+            db: Optional database session to check and persist DB records.
 
         Returns:
             dict matching the AIExplanation schema.
@@ -56,6 +60,8 @@ class ExplanationService:
         Raises:
             LLMError subclasses on failure.
         """
+        finding_id = finding.get("id")
+
         # Resolve the actual file path on disk (if project_path is provided)
         file_path = _resolve_file_path(project_path, finding.get("file", ""))
 
@@ -68,24 +74,44 @@ class ExplanationService:
             except Exception as e:
                 logger.error(f"ExplanationService: Snippet extraction failed for {file_path}: {e}")
 
-        # 2. Check Cache
+        # 2. Check in-memory Cache first
         cache_key = ExplanationCache.make_key(finding, snippet)
         cached_result = ExplanationCache.get(cache_key)
         if cached_result:
-            logger.info("ExplanationService: Cache hit. Returning cached explanation.")
-            # Set cached=True on the returned copy, but keep cached=False in the store
+            logger.info("ExplanationService: In-memory cache hit. Returning cached explanation.")
             result = dict(cached_result)
             result["cached"] = True
             return result
 
-        # 3. Build Prompt
+        # 3. Check Database if finding_id is present
+        if db and finding_id:
+            try:
+                db_explanation = db.query(AIExplanation).filter(AIExplanation.finding_id == finding_id).first()
+                if db_explanation:
+                    logger.info(f"ExplanationService: DB hit for finding_id {finding_id}. Loading into memory cache.")
+                    result = {
+                        "summary":          db_explanation.summary,
+                        "why_it_matters":   db_explanation.why_it_matters,
+                        "potential_impact": db_explanation.potential_impact,
+                        "recommended_fix":  db_explanation.recommended_fix,
+                        "best_practice":    db_explanation.best_practice,
+                        "cached":           True,
+                        "model_used":       db_explanation.model,
+                    }
+                    # Populate in-memory cache for future fast reads
+                    ExplanationCache.set(cache_key, result)
+                    return result
+            except Exception as db_err:
+                logger.error(f"ExplanationService: Database query failed: {db_err}")
+
+        # 4. Build Prompt
         prompt = PromptBuilder.build(finding, snippet)
         system_instruction = PromptBuilder.SYSTEM_INSTRUCTION
 
-        # 4. Request generation from LLM (propagates LLMError subclasses)
+        # 5. Request generation from LLM (propagates LLMError subclasses)
         raw_response = LLMClient.complete(prompt, system_instruction)
 
-        # 5. Validate the structured response
+        # 6. Validate the structured response
         if not isinstance(raw_response, dict):
             logger.error(f"ExplanationService: Response is not a dict: {raw_response}")
             raise LLMInvalidResponseError("LLM response did not return a structured JSON object.")
@@ -110,7 +136,26 @@ class ExplanationService:
             "model_used":       model_name,
         }
 
-        # 6. Cache the output
+        # 7. Save to Database if db and finding_id are available
+        if db and finding_id:
+            try:
+                db_explanation = AIExplanation(
+                    finding_id=finding_id,
+                    model=model_name,
+                    summary=explanation["summary"],
+                    why_it_matters=explanation["why_it_matters"],
+                    potential_impact=explanation["potential_impact"],
+                    recommended_fix=explanation["recommended_fix"],
+                    best_practice=explanation["best_practice"]
+                )
+                db.add(db_explanation)
+                db.commit()
+                logger.info(f"ExplanationService: Persisted explanation for finding_id {finding_id} to DB.")
+            except Exception as db_save_err:
+                db.rollback()
+                logger.error(f"ExplanationService: Failed to save explanation to database: {db_save_err}")
+
+        # 8. Save to in-memory Cache
         ExplanationCache.set(cache_key, explanation)
 
         return explanation

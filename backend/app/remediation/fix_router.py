@@ -1,5 +1,7 @@
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy.orm import Session
+from app.database.connection import get_db
 from app.remediation.schemas import FixRequest, RemediationFix
 from app.remediation.remediation_service import RemediationService
 from app.ai.llm_client import (
@@ -16,7 +18,7 @@ router = APIRouter(prefix="/findings", tags=["AI Remediation"])
 
 
 @router.post("/fix", response_model=RemediationFix)
-def fix_finding(payload: FixRequest):
+def fix_finding(payload: FixRequest, db: Session = Depends(get_db)):
     """
     On-demand AI remediation endpoint.
     Generates a minimal, validated, diff-annotated security fix for a single finding.
@@ -32,7 +34,7 @@ def fix_finding(payload: FixRequest):
         )
 
     try:
-        fix = RemediationService.fix(finding, project_path)
+        fix = RemediationService.fix(finding, project_path, db)
         return fix
 
     except LLMUnavailableError as e:

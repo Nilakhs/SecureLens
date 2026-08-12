@@ -6,12 +6,14 @@ import logging
 import tempfile
 import shutil
 import subprocess
+from sqlalchemy.orm import Session
 
 from app.ai.snippet_extractor import SnippetExtractor
 from app.ai.llm_client import LLMInvalidResponseError
 from app.remediation.patch_generator import PatchGenerator
 from app.remediation.patch_validator import PatchValidator
 from app.remediation.diff_generator import DiffGenerator
+from app.models.remediation import Remediation
 
 logger = logging.getLogger(__name__)
 
@@ -170,13 +172,15 @@ class RemediationService:
     REQUIRED_KEYS = {"fixed_code", "explanation", "changes", "limitations"}
 
     @classmethod
-    def fix(cls, finding: dict, project_path: str | None = None) -> dict:
+    def fix(cls, finding: dict, project_path: str | None = None, db: Session | None = None) -> dict:
         """
         Generate a verified, validated AI-proposed security fix.
+        Utilizes both in-memory cache and PostgreSQL database persistence.
 
         Args:
             finding:      Normalized finding dict.
             project_path: Path to extracted project on disk (optional).
+            db:           Optional database session.
 
         Returns:
             dict matching RemediationFix schema.
@@ -184,6 +188,8 @@ class RemediationService:
         Raises:
             LLMError subclasses on AI failure.
         """
+        finding_id = finding.get("id")
+
         # 1. Resolve file path
         file_path = _resolve_file_path(project_path, finding.get("file", ""))
 
@@ -198,19 +204,49 @@ class RemediationService:
 
         original_code = snippet["code"] if snippet else ""
 
-        # 3. Cache check
+        # 3. Check in-memory Cache first
         cache_key = RemediationCache.make_key(finding, snippet)
         cached = RemediationCache.get(cache_key)
         if cached:
-            logger.info("RemediationService: Cache hit.")
+            logger.info("RemediationService: In-memory cache hit.")
             result = dict(cached)
             result["cached"] = True
             return result
 
-        # 4. Generate patch via AI
+        # 4. Check Database if finding_id is present
+        if db and finding_id:
+            try:
+                db_remediation = db.query(Remediation).filter(Remediation.finding_id == finding_id).first()
+                if db_remediation:
+                    logger.info(f"RemediationService: DB hit for finding_id {finding_id}. Loading into memory cache.")
+                    
+                    # Convert stored bullet points list back from DB format if list was saved as JSON
+                    # Wait, in SQLAlchemy remediations table, changes is not stored, only explanation/original/fixed/diff.
+                    # Wait, we can construct standard changes from explanation if needed, or if we look at DB columns:
+                    # original_code, fixed_code, explanation, diff, syntax_valid, verification_status.
+                    # Let's see: we can mock changes from explanation or retrieve it
+                    result = {
+                        "original_code":       db_remediation.original_code,
+                        "fixed_code":          db_remediation.fixed_code,
+                        "explanation":         db_remediation.explanation,
+                        "changes":             ["Security fix applied from database record."], # fallback
+                        "limitations":         "Audit record from previous generation.",
+                        "diff":                db_remediation.diff,
+                        "syntax_valid":        db_remediation.syntax_valid,
+                        "language":            "unknown",  # fallback
+                        "verification_status": db_remediation.verification_status,
+                        "cached":              True,
+                        "model_used":          db_remediation.model,
+                    }
+                    RemediationCache.set(cache_key, result)
+                    return result
+            except Exception as db_err:
+                logger.error(f"RemediationService: Database query failed: {db_err}")
+
+        # 5. Generate patch via AI
         raw = PatchGenerator.generate(finding, snippet)
 
-        # 5. Validate response structure
+        # 6. Validate response structure
         if not isinstance(raw, dict):
             raise LLMInvalidResponseError("Remediation AI response was not a JSON object.")
         missing = cls.REQUIRED_KEYS - raw.keys()
@@ -228,14 +264,14 @@ class RemediationService:
         else:
             changes = [str(changes_raw).strip()]
 
-        # 6. Syntax validation
+        # 7. Syntax validation
         syntax_valid, language = PatchValidator.validate(fixed_code, finding.get("file"))
 
-        # 7. Generate unified diff
+        # 8. Generate unified diff
         fname = os.path.basename(finding.get("file", "file"))
         diff  = DiffGenerator.generate(original_code, fixed_code, fname)
 
-        # 8. Stretch: re-scan verification
+        # 9. Stretch: re-scan verification
         verification_status = "UNVERIFIED"
         if syntax_valid and file_path and snippet:
             verification_status = _verify_fix(finding, file_path, snippet, fixed_code)
@@ -256,5 +292,26 @@ class RemediationService:
             "model_used":          model_name,
         }
 
+        # 10. Save to Database if db and finding_id are available
+        if db and finding_id:
+            try:
+                db_remediation = Remediation(
+                    finding_id=finding_id,
+                    model=model_name,
+                    original_code=original_code,
+                    fixed_code=fixed_code,
+                    explanation=explanation,
+                    diff=diff,
+                    syntax_valid=syntax_valid,
+                    verification_status=verification_status
+                )
+                db.add(db_remediation)
+                db.commit()
+                logger.info(f"RemediationService: Saved remediation for finding_id {finding_id} to DB.")
+            except Exception as db_save_err:
+                db.rollback()
+                logger.error(f"RemediationService: Failed to save remediation to database: {db_save_err}")
+
+        # 11. Save to in-memory Cache
         RemediationCache.set(cache_key, result)
         return result
